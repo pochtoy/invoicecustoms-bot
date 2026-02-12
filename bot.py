@@ -3,6 +3,8 @@ import json
 import base64
 import logging
 import threading
+import asyncio
+import time
 from io import BytesIO
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -15,12 +17,14 @@ from telegram.ext import (
     filters,
 )
 import anthropic
+import httpx
 
 # ─── Config ───
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 ALLOWED_USERS = os.environ.get("ALLOWED_USERS", "")
 PORT = int(os.environ.get("PORT", 10000))
+RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL", "")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -28,7 +32,7 @@ logger = logging.getLogger(__name__)
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
 
-# ─── Simple health check server (keeps Render happy) ───
+# ─── Health check server + auto-ping ───
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -37,12 +41,24 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"Bot is running")
 
     def log_message(self, format, *args):
-        pass  # suppress logs
+        pass
 
 
 def start_health_server():
     server = HTTPServer(("0.0.0.0", PORT), HealthHandler)
     server.serve_forever()
+
+
+def auto_ping():
+    """Ping self every 4 minutes to prevent Render from sleeping"""
+    url = RENDER_URL or f"http://localhost:{PORT}"
+    while True:
+        time.sleep(240)  # 4 minutes
+        try:
+            httpx.get(url, timeout=10)
+            logger.info("Auto-ping OK")
+        except Exception as e:
+            logger.warning(f"Auto-ping failed: {e}")
 
 
 # ─── Session storage ───
@@ -131,6 +147,7 @@ async def process_invoices(images_b64):
     "pages": "какие фото относятся к этой посылке",
     "trackingNumber": "трек-номер",
     "shipmentId": "ID отправления если есть",
+    "accountNumber": "номер аккаунта (Account Number / Account No) если указан в инвойсе",
     "shipper": "название отправителя",
     "shipperCountry": "страна отправителя",
     "recipient": "ФИО получателя",
@@ -141,7 +158,7 @@ async def process_invoices(images_b64):
     "entryPrepFee": "сбор за оформление (только число)",
     "totalCharges": "итого к оплате ФИНАЛЬНАЯ сумма (только число)",
     "invoiceNumber": "номер инвойса",
-    "invoiceDate": "дата инвойса",
+    "invoiceDate": "дата инвойса (в формате как указано в документе)",
     "carrier": "перевозчик (UPS/FedEx/DHL/другой)",
     "paymentUrl": "URL для оплаты если указан, иначе N/A",
     "notes": "замечания если есть"
@@ -152,6 +169,8 @@ async def process_invoices(images_b64):
 - Если несколько страниц имеют одинаковый трек-номер или shipment ID — это ОДНА посылка
 - Итоговую сумму бери оттуда, где указан финальный Total Charges
 - ОБЯЗАТЕЛЬНО найди ссылку/URL для оплаты
+- ОБЯЗАТЕЛЬНО найди номер аккаунта (Account Number / Account No.) — он обычно вверху инвойса
+- ОБЯЗАТЕЛЬНО найди дату инвойса (Invoice Date)
 - Числовые поля — только цифры с точкой, без знака доллара
 - Если поле не найдено — "N/A"
 """,
@@ -301,12 +320,16 @@ async def send_shipment_card(update, context, session, idx):
         f"━━━━━━━━━━━━━━━\n\n"
         f"💳 *ДАННЫЕ ДЛЯ ОПЛАТЫ:*\n"
         f"├ Инвойс: `{s.get('invoiceNumber', 'N/A')}`\n"
+        f"├ Дата инвойса: {s.get('invoiceDate', 'N/A')}\n"
         f"├ Сумма: *${s.get('totalCharges', 'N/A')} USD*\n"
         f"├ Трек: `{s.get('trackingNumber', 'N/A')}`\n"
     )
 
     if s.get("shipmentId") and s["shipmentId"] != "N/A":
         payment_text += f"├ Shipment ID: `{s['shipmentId']}`\n"
+
+    if s.get("accountNumber") and s["accountNumber"] != "N/A":
+        payment_text += f"├ Аккаунт: `{s['accountNumber']}`\n"
 
     payment_text += (
         f"└ Перевозчик: {s.get('carrier', 'N/A')}\n\n"
@@ -425,14 +448,18 @@ async def cmd_tickets(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="MarkdownV2",
         )
 
-import asyncio
 
 # ─── Main ───
 async def main():
-    # Start health check server in background thread
+    # Start health check server
     health_thread = threading.Thread(target=start_health_server, daemon=True)
     health_thread.start()
     logger.info(f"Health server started on port {PORT}")
+
+    # Start auto-ping to prevent sleeping
+    ping_thread = threading.Thread(target=auto_ping, daemon=True)
+    ping_thread.start()
+    logger.info("Auto-ping started (every 4 minutes)")
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
