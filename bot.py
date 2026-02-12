@@ -53,7 +53,7 @@ def auto_ping():
     """Ping self every 4 minutes to prevent Render from sleeping"""
     url = RENDER_URL or f"http://localhost:{PORT}"
     while True:
-        time.sleep(240)  # 4 minutes
+        time.sleep(240)
         try:
             httpx.get(url, timeout=10)
             logger.info("Auto-ping OK")
@@ -314,6 +314,8 @@ async def cmd_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def send_shipment_card(update, context, session, idx):
     s = session["shipments"][idx]
     num = idx + 1
+    tracking = s.get("trackingNumber", "N/A")
+    admin_link = f"https://www.pochtoy.com/admin-room/income_packages_list?user_id=&tracking={tracking}"
 
     payment_text = (
         f"📦 *Посылка {num}* — {s.get('shipper', 'N/A')}\n"
@@ -322,7 +324,7 @@ async def send_shipment_card(update, context, session, idx):
         f"├ Инвойс: `{s.get('invoiceNumber', 'N/A')}`\n"
         f"├ Дата инвойса: {s.get('invoiceDate', 'N/A')}\n"
         f"├ Сумма: *${s.get('totalCharges', 'N/A')} USD*\n"
-        f"├ Трек: `{s.get('trackingNumber', 'N/A')}`\n"
+        f"├ Трек: [{tracking}]({admin_link})\n"
     )
 
     if s.get("shipmentId") and s["shipmentId"] != "N/A":
@@ -352,6 +354,9 @@ async def send_shipment_card(update, context, session, idx):
             url = "https://" + url
         buttons.append([InlineKeyboardButton("🌐 Перейти к оплате", url=url)])
 
+    buttons.append([
+        InlineKeyboardButton("📦 Найти в админке", url=admin_link),
+    ])
     buttons.append([
         InlineKeyboardButton("✅ Оплата согласована", callback_data=f"approve_{idx}"),
         InlineKeyboardButton("❌ Не согласована", callback_data=f"reject_{idx}"),
