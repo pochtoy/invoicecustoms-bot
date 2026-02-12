@@ -425,9 +425,10 @@ async def cmd_tickets(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="MarkdownV2",
         )
 
+import asyncio
 
 # ─── Main ───
-def main():
+async def main():
     # Start health check server in background thread
     health_thread = threading.Thread(target=start_health_server, daemon=True)
     health_thread.start()
@@ -445,8 +446,12 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_callback))
 
     logger.info("Bot started!")
-    app.run_polling()
+    async with app:
+        await app.start()
+        await app.updater.start_polling()
+        while True:
+            await asyncio.sleep(3600)
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
