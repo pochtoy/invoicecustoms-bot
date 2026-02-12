@@ -2,7 +2,9 @@ import os
 import json
 import base64
 import logging
+import threading
 from io import BytesIO
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -13,21 +15,37 @@ from telegram.ext import (
     filters,
 )
 import anthropic
-import httpx
 
 # ─── Config ───
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
-# Optional: restrict bot to specific user IDs (comma-separated)
 ALLOWED_USERS = os.environ.get("ALLOWED_USERS", "")
+PORT = int(os.environ.get("PORT", 10000))
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
+
+# ─── Simple health check server (keeps Render happy) ───
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"Bot is running")
+
+    def log_message(self, format, *args):
+        pass  # suppress logs
+
+
+def start_health_server():
+    server = HTTPServer(("0.0.0.0", PORT), HealthHandler)
+    server.serve_forever()
+
+
 # ─── Session storage ───
-# user_id -> { "images": [base64_list], "shipments": [...], "phase": "..." }
 sessions = {}
 
 
@@ -204,10 +222,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         session["images"] = []
         session["shipments"] = []
 
-    photo = update.message.photo[-1]  # highest resolution
+    photo = update.message.photo[-1]
     file = await context.bot.get_file(photo.file_id)
 
-    # Download photo
     bio = BytesIO()
     await file.download_to_memory(bio)
     bio.seek(0)
@@ -246,7 +263,6 @@ async def cmd_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         session["phase"] = "review"
 
-        # Send results
         for i, s in enumerate(session["shipments"]):
             await send_shipment_card(update, context, session, i)
 
@@ -280,7 +296,6 @@ async def send_shipment_card(update, context, session, idx):
     s = session["shipments"][idx]
     num = idx + 1
 
-    # Payment data
     payment_text = (
         f"📦 *Посылка {num}* — {s.get('shipper', 'N/A')}\n"
         f"━━━━━━━━━━━━━━━\n\n"
@@ -307,7 +322,6 @@ async def send_shipment_card(update, context, session, idx):
     if s.get("notes") and s["notes"] != "N/A" and s["notes"]:
         payment_text += f"\n⚠️ {s['notes']}\n"
 
-    # Buttons
     buttons = []
     url = s.get("paymentUrl", "N/A")
     if url and url != "N/A":
@@ -414,6 +428,11 @@ async def cmd_tickets(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ─── Main ───
 def main():
+    # Start health check server in background thread
+    health_thread = threading.Thread(target=start_health_server, daemon=True)
+    health_thread.start()
+    logger.info(f"Health server started on port {PORT}")
+
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start", cmd_start))
